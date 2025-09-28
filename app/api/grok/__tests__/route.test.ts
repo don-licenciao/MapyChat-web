@@ -17,6 +17,16 @@ const buildRequest = (overrides: Record<string, unknown> = {}) =>
     }),
   });
 
+const encoder = new TextEncoder();
+const buildStream = () =>
+  new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"hola"}}]}\n\n'));
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+
 describe('POST /api/grok', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -30,27 +40,20 @@ describe('POST /api/grok', () => {
     vi.resetModules();
   });
 
-  it('incluye encabezados RateLimit-* en respuestas exitosas', async () => {
-    const textEncoder = new TextEncoder();
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(
-          textEncoder.encode('data: {"choices":[{"delta":{"content":"hola"}}] }\n\n'),
-        );
-        controller.enqueue(textEncoder.encode('data: [DONE]\n\n'));
-        controller.close();
-      },
-    });
+  it('incluye encabezados RateLimit-* y max_output_tokens según responseLevel', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(buildStream(), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
 
-    global.fetch = vi.fn().mockResolvedValue(
-      new Response(stream, {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
-      }),
-    );
+    global.fetch = fetchMock;
 
     const { POST } = await import('../route');
-    const response = await POST(buildRequest());
+    const response = await POST(buildRequest({ responseLevel: 4 }));
     const limit = response.headers.get('ratelimit-limit');
     const remaining = response.headers.get('ratelimit-remaining');
     const reset = response.headers.get('ratelimit-reset');
@@ -59,24 +62,16 @@ describe('POST /api/grok', () => {
     expect(limit).toBe('10');
     expect(remaining).toBe('9');
     expect(Number(reset)).toBeGreaterThanOrEqual(1);
+
+    const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(body.max_output_tokens).toBe(1024);
   });
 
   it('responde con 429 y encabezados informativos al superar el límite', async () => {
-    const textEncoder = new TextEncoder();
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(
-          textEncoder.encode('data: {"choices":[{"delta":{"content":"hola"}}] }\n\n'),
-        );
-        controller.enqueue(textEncoder.encode('data: [DONE]\n\n'));
-        controller.close();
-      },
-    });
-
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
-        new Response(stream, {
+        new Response(buildStream(), {
           status: 200,
           headers: { 'Content-Type': 'text/event-stream' },
         }),
@@ -101,21 +96,10 @@ describe('POST /api/grok', () => {
   });
 
   it('antepone el prompt de personaje como mensaje de sistema', async () => {
-    const textEncoder = new TextEncoder();
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(
-          textEncoder.encode('data: {"choices":[{"delta":{"content":"hola"}}]}\n\n'),
-        );
-        controller.enqueue(textEncoder.encode('data: [DONE]\n\n'));
-        controller.close();
-      },
-    });
-
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
-        new Response(stream, {
+        new Response(buildStream(), {
           status: 200,
           headers: { 'Content-Type': 'text/event-stream' },
         }),
@@ -137,5 +121,47 @@ describe('POST /api/grok', () => {
     expect(body.messages[0]).toEqual({ role: 'system', content: 'hola' });
     expect(body.messages[1]).toEqual({ role: 'system', content: 'voz heroica' });
     expect(body.messages[2]).toEqual({ role: 'user', content: 'hola' });
+    expect(body.max_output_tokens).toBe(512);
+  });
+
+  it('aplica clamping de responseLevel y maxTokens directos', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(buildStream(), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
+
+    global.fetch = fetchMock;
+
+    const { POST } = await import('../route');
+
+    const highLevelResponse = await POST(buildRequest({ responseLevel: 9 }));
+    expect(highLevelResponse.status).toBe(200);
+    let body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(body.max_output_tokens).toBe(2048);
+
+    fetchMock.mockClear();
+
+    const lowLevelResponse = await POST(buildRequest({ responseLevel: 0 }));
+    expect(lowLevelResponse.status).toBe(200);
+    body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(body.max_output_tokens).toBe(128);
+
+    fetchMock.mockClear();
+
+    const defaultResponse = await POST(buildRequest());
+    expect(defaultResponse.status).toBe(200);
+    body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(body.max_output_tokens).toBe(512);
+
+    fetchMock.mockClear();
+
+    const maxTokensResponse = await POST(buildRequest({ maxTokens: 9999 }));
+    expect(maxTokensResponse.status).toBe(200);
+    body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(body.max_output_tokens).toBe(2048);
   });
 });

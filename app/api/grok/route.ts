@@ -12,12 +12,24 @@ type RequestBody = {
   systemPrompt: string;
   characterPrompt?: string;
   messages: ChatMessage[];
+  responseLevel?: number;
+  maxTokens?: number;
 };
 
 const ALLOWED_MODELS = new Set(['grok-4-fast-reasoning', 'grok-4-fast-non-reasoning']);
 
 const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10);
 const RATE_LIMIT_MAX_REQUESTS = Number.parseInt(process.env.RATE_LIMIT_MAX_REQUESTS ?? '10', 10);
+
+const BASE = 128;
+const MIN_OUTPUT_TOKENS = BASE;
+const MAX_OUTPUT_TOKENS = BASE * 2 ** (5 - 1);
+const DEFAULT_OUTPUT_TOKENS = BASE * 2 ** (3 - 1);
+
+function tokensForLevel(level: number): number {
+  const n = Math.max(1, Math.min(5, Math.floor(Number.isFinite(level) ? level : 3)));
+  return BASE * 2 ** (n - 1);
+}
 
 type RateEntry = {
   count: number;
@@ -149,7 +161,7 @@ export async function POST(req: NextRequest) {
     };
 
     const body = (await req.json()) as Partial<RequestBody>;
-    const { model, temperature, systemPrompt, characterPrompt, messages } = body;
+    const { model, temperature, systemPrompt, characterPrompt, messages, responseLevel, maxTokens } = body;
 
     if (!model || !ALLOWED_MODELS.has(model)) {
       return jsonError('Modelo no válido', 400, 'bad_request', rateLimitHeaders);
@@ -204,6 +216,16 @@ export async function POST(req: NextRequest) {
 
     const clampedTemp = Math.min(Math.max(typeof temperature === 'number' ? temperature : 0.8, 0), 2);
 
+    let resolvedMaxTokens: number;
+    if (typeof responseLevel === 'number' && Number.isFinite(responseLevel)) {
+      resolvedMaxTokens = tokensForLevel(responseLevel);
+    } else if (typeof maxTokens === 'number' && Number.isFinite(maxTokens)) {
+      const coerced = Math.floor(maxTokens);
+      resolvedMaxTokens = Math.min(Math.max(coerced, MIN_OUTPUT_TOKENS), MAX_OUTPUT_TOKENS);
+    } else {
+      resolvedMaxTokens = DEFAULT_OUTPUT_TOKENS;
+    }
+
     const systemMsg: ChatMessage = { role: 'system', content: systemPrompt };
     const finalMsgs: ChatMessage[] = [systemMsg, ...safeMsgs].slice(-51);
 
@@ -212,11 +234,14 @@ export async function POST(req: NextRequest) {
       temperature: clampedTemp,
       stream: true,
       messages: finalMsgs,
+      // Grok expects max_output_tokens to control the length of the response.
+      max_output_tokens: resolvedMaxTokens,
     } satisfies {
       model: string;
       temperature: number;
       stream: boolean;
       messages: ChatMessage[];
+      max_output_tokens: number;
     };
 
     const apiKey = process.env.XAI_API_KEY;

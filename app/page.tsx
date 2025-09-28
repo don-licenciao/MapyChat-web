@@ -21,6 +21,12 @@ const estimateSegmentTokens = (segment: string) => {
 };
 
 const STORAGE_KEY = 'mapychat.age.v1';
+const RESPONSE_LEVEL_STORAGE_KEY = 'mapychat.responseLevel.v1';
+const BASE_OUTPUT_TOKENS = 128;
+const tokensForLevel = (level: number) => {
+  const n = Math.max(1, Math.min(5, Math.floor(Number.isFinite(level) ? level : 3)));
+  return BASE_OUTPUT_TOKENS * 2 ** (n - 1);
+};
 const MAX_STREAM_RETRIES = 2;
 const RETRY_BASE_DELAY_MS = 1000;
 
@@ -31,6 +37,7 @@ export default function Home() {
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [model, setModel] = useState('grok-4-fast-reasoning');
   const [temperature, setTemperature] = useState(0.8);
+  const [responseLevel, setResponseLevel] = useState(3);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [characterPrompt, setCharacterPrompt] = useState(DEFAULT_CHARACTER_PROMPT);
@@ -38,6 +45,8 @@ export default function Home() {
   const [showCharacterPrompt, setShowCharacterPrompt] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
+
+  const maxResponseTokens = useMemo(() => tokensForLevel(responseLevel), [responseLevel]);
 
   const approximateTokenCount = useMemo(() => {
     const historyTokens = messages.reduce(
@@ -68,6 +77,22 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const storedLevel = window.localStorage.getItem(RESPONSE_LEVEL_STORAGE_KEY);
+      if (storedLevel) {
+        const parsed = Number.parseInt(storedLevel, 10);
+        if (Number.isFinite(parsed)) {
+          const clamped = Math.max(1, Math.min(5, parsed));
+          setResponseLevel(clamped);
+        }
+      }
+    } catch (storageError) {
+      console.error('No se pudo leer preferencia de longitud de respuesta:', storageError);
+    }
+  }, []);
+
+  useEffect(() => {
     if (!chatRef.current) return;
     chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
@@ -93,6 +118,17 @@ export default function Home() {
     setCharacterPrompt(sanitized.slice(0, 4000));
   };
 
+  const handleResponseLevelChange = (value: number) => {
+    const coerced = Math.max(1, Math.min(5, Math.floor(Number.isFinite(value) ? value : 3)));
+    setResponseLevel(coerced);
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(RESPONSE_LEVEL_STORAGE_KEY, String(coerced));
+    } catch (storageError) {
+      console.error('No se pudo persistir la preferencia de longitud de respuesta:', storageError);
+    }
+  };
+
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const streamWithRetries = async (
@@ -102,6 +138,8 @@ export default function Home() {
       systemPrompt: string;
       characterPrompt: string;
       messages: Message[];
+      responseLevel: number;
+      maxTokens: number;
     },
     attempt = 0,
   ): Promise<void> => {
@@ -231,6 +269,8 @@ export default function Home() {
           systemPrompt,
           characterPrompt,
           messages: nextMessages,
+          responseLevel,
+          maxTokens: maxResponseTokens,
         },
         0,
       );
@@ -397,6 +437,22 @@ export default function Home() {
               onChange={(event) => setTemperature(Number(event.target.value))}
               className="w-full"
             />
+          </div>
+          <div className="flex flex-1 flex-col">
+            <label htmlFor="responseLevel" className="mb-2 block text-sm font-medium text-gray-300">
+              Longitud de respuesta (1–5)
+            </label>
+            <input
+              id="responseLevel"
+              type="range"
+              min={1}
+              max={5}
+              step={1}
+              value={responseLevel}
+              onChange={(event) => handleResponseLevelChange(Number(event.target.value))}
+              className="w-full"
+            />
+            <span className="mt-1 text-xs text-gray-400">Salida máx: {maxResponseTokens} tokens</span>
           </div>
         </div>
         <div className="flex flex-col gap-3 md:flex-row">

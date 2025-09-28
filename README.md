@@ -54,6 +54,21 @@ Antes de enviar cambios o tras un rebase, ejecuta:
 ### Límite de peticiones
 El proxy aplica un rate limit sencillo de **10 solicitudes por minuto** por IP (configurable con `RATE_LIMIT_MAX_REQUESTS` y `RATE_LIMIT_WINDOW_MS`). Cada respuesta incluye los encabezados `RateLimit-*` para que el cliente sepa cuánto resta antes del reinicio. En caso de superarlo, responde con `429`, `Retry-After` y los mismos encabezados informativos.
 
+### Control de longitud de respuesta
+La interfaz incluye un slider "Longitud de respuesta (1–5)" que ajusta el máximo de tokens de salida que solicitará el chatbot. Cada nivel duplica la base de 128 tokens:
+
+| Nivel | Tokens máximos |
+| --- | --- |
+| 1 | 128 |
+| 2 | 256 |
+| 3 (predeterminado) | 512 |
+| 4 | 1024 |
+| 5 | 2048 |
+
+El cliente persiste la preferencia en `localStorage` y envía el valor resultante como `max_output_tokens` al proxy (`/api/grok`). El servidor acepta `responseLevel` o `maxTokens`, valida la escala y siempre clampéa el rango permitido (128–2048) antes de reenviar la solicitud a xAI.
+
+> Nota: si el proveedor aplica límites distintos por modelo, esos topes prevalecen sobre la configuración local.
+
 ## Avisos importantes
 - Respeta la Acceptable Use Policy de xAI y las leyes aplicables.
 - La aplicación es estrictamente para mayores de 18 años.
