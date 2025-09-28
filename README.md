@@ -39,6 +39,12 @@ Una SPA para chatear con Grok de xAI mediante streaming SSE, con guardas estrict
 - `npm run lint`: linting con ESLint.
 - `npm run test`: pruebas unitarias con Vitest para `nsfwGuard`.
 
+### Verificación recomendada
+Antes de abrir un Pull Request ejecuta:
+- `npm run test`
+- `npm run build`
+Así confirmas que las pruebas del guard y el build de Next.js siguen pasando después de un rebase.
+
 ## Deploy en Vercel
 1. Importa el repositorio en un proyecto de Vercel.
 2. Define la variable de entorno `XAI_API_KEY` en el dashboard del proyecto.
