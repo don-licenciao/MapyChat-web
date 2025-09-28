@@ -159,7 +159,7 @@ export async function POST(req: NextRequest) {
     };
 
     const body = (await req.json()) as Partial<RequestBody>;
-    const { model, temperature, systemPrompt, messages } = body;
+    const { model, temperature, systemPrompt, messages: rawMessages } = body;
 
     if (!model || !ALLOWED_MODELS.has(model)) {
       return jsonError('Modelo no válido', 400, 'bad_request', rateLimitHeaders);
@@ -169,23 +169,21 @@ export async function POST(req: NextRequest) {
       return jsonError('systemPrompt inválido o demasiado largo', 400, 'bad_request', rateLimitHeaders);
     }
 
-    if (!Array.isArray(messages) || messages.length === 0 || messages.length > 50) {
+    if (!Array.isArray(rawMessages) || rawMessages.length === 0 || rawMessages.length > 50) {
       return jsonError('messages inválido o demasiados elementos', 400, 'bad_request', rateLimitHeaders);
     }
 
-    const areValidMessages = messages.every((message): message is ChatMessage => {
+    const typedMessages: ChatMessage[] = [];
+    for (const message of rawMessages) {
       if (!isChatMessage(message)) {
-        return false;
+        return jsonError('Mensaje inválido', 400, 'bad_request', rateLimitHeaders);
       }
       const length = message.content.length;
-      return length > 0 && length <= 8000;
-    });
-
-    if (!areValidMessages) {
-      return jsonError('Mensaje inválido', 400, 'bad_request', rateLimitHeaders);
+      if (length === 0 || length > 8000) {
+        return jsonError('Mensaje inválido', 400, 'bad_request', rateLimitHeaders);
+      }
+      typedMessages.push({ role: message.role, content: message.content });
     }
-
-    const typedMessages = messages;
 
     const lastUserMessage = [...typedMessages].reverse().find((msg) => msg.role === 'user');
     if (!lastUserMessage) {
