@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
-const buildRequest = () =>
+const buildRequest = (overrides: Record<string, unknown> = {}) =>
   new NextRequest('https://example.com/api/grok', {
     method: 'POST',
     headers: new Headers({
@@ -13,6 +13,7 @@ const buildRequest = () =>
       temperature: 0.8,
       systemPrompt: 'hola',
       messages: [{ role: 'user', content: 'hola' }],
+      ...overrides,
     }),
   });
 
@@ -97,5 +98,44 @@ describe('POST /api/grok', () => {
     expect(limitedResponse.headers.get('ratelimit-remaining')).toBe('0');
     expect(limitedResponse.headers.get('ratelimit-reset')).toBe('60');
     expect(fetchMock).toHaveBeenCalledTimes(10);
+  });
+
+  it('antepone el prompt de personaje como mensaje de sistema', async () => {
+    const textEncoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          textEncoder.encode('data: {"choices":[{"delta":{"content":"hola"}}]}\n\n'),
+        );
+        controller.enqueue(textEncoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
+
+    global.fetch = fetchMock;
+
+    const { POST } = await import('../route');
+
+    const response = await POST(
+      buildRequest({ characterPrompt: '  voz heroica \u0000\n' }),
+    );
+
+    expect(response.status).toBe(200);
+    const fetchArgs = fetchMock.mock.calls[0];
+    expect(fetchArgs).toBeDefined();
+    const body = JSON.parse(fetchArgs[1]?.body as string);
+    expect(body.messages).toHaveLength(3);
+    expect(body.messages[0]).toEqual({ role: 'system', content: 'hola' });
+    expect(body.messages[1]).toEqual({ role: 'system', content: 'voz heroica' });
+    expect(body.messages[2]).toEqual({ role: 'user', content: 'hola' });
   });
 });

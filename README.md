@@ -3,7 +3,8 @@
 Una SPA para chatear con Grok de xAI mediante streaming SSE, con guardas estrictas de contenido.
 
 ## Características principales
-- **Interfaz de chat** con soporte de streaming SSE y controles para `systemPrompt`, modelo y temperatura.
+- **Interfaz de chat** con soporte de streaming SSE, sección de historial ampliada y controles para `systemPrompt`, modelo y temperatura.
+- **Prompts configurables** para sistema y personajes, con paneles colapsables "Mostrar/Ocultar" que permiten ajustar la voz sin ocupar espacio en pantalla.
 - **Age Gate** persistente en `localStorage` que requiere confirmación 18+ antes de usar la app.
 - **nsfwGuard** avanzado que bloquea referencias a menores, reglas duras (temas de i**cesto, z**filia, etc.), doxxing y likeness real en contexto sexual.
 - **Proxy SSE** en `/api/grok` ejecutándose en runtime Edge que valida la petición y reenvía la respuesta de xAI sin modificar el stream.

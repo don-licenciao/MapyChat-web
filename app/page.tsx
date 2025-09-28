@@ -9,6 +9,7 @@ type Message = {
 };
 
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente útil y amigable. Siempre responde en español de México. Rechaza cualquier solicitud que involucre a menores de edad, contenido ilegal, violencia o explotación. Nunca pidas datos personales sensibles como direcciones, números de teléfono o información real. Mantén las respuestas seguras y responsables.`;
+const DEFAULT_CHARACTER_PROMPT = '';
 
 const estimateSegmentTokens = (segment: string) => {
   const sanitized = segment.replace(/\s+/g, ' ').trim();
@@ -32,6 +33,9 @@ export default function Home() {
   const [temperature, setTemperature] = useState(0.8);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [characterPrompt, setCharacterPrompt] = useState(DEFAULT_CHARACTER_PROMPT);
+  const [showSystemPrompt, setShowSystemPrompt] = useState(true);
+  const [showCharacterPrompt, setShowCharacterPrompt] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
 
@@ -42,10 +46,11 @@ export default function Home() {
     );
     return (
       estimateSegmentTokens(systemPrompt) +
+      estimateSegmentTokens(characterPrompt) +
       historyTokens +
       estimateSegmentTokens(input)
     );
-  }, [messages, systemPrompt, input]);
+  }, [messages, systemPrompt, characterPrompt, input]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -76,9 +81,16 @@ export default function Home() {
     setAgeConfirmed(true);
   };
 
+  const sanitizePrompt = (value: string) => value.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+
   const handleSystemPromptChange = (value: string) => {
-    const sanitized = value.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+    const sanitized = sanitizePrompt(value);
     setSystemPrompt(sanitized.slice(0, 4000));
+  };
+
+  const handleCharacterPromptChange = (value: string) => {
+    const sanitized = sanitizePrompt(value);
+    setCharacterPrompt(sanitized.slice(0, 4000));
   };
 
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -88,6 +100,7 @@ export default function Home() {
       model: string;
       temperature: number;
       systemPrompt: string;
+      characterPrompt: string;
       messages: Message[];
     },
     attempt = 0,
@@ -216,6 +229,7 @@ export default function Home() {
           model,
           temperature,
           systemPrompt,
+          characterPrompt,
           messages: nextMessages,
         },
         0,
@@ -269,21 +283,24 @@ export default function Home() {
 
   return (
     <div className="relative flex h-screen flex-col bg-gray-900 text-white">
-      <div className="pointer-events-none fixed right-4 top-4 rounded-full bg-gray-800/80 px-4 py-1 text-xs font-medium text-gray-300 shadow">
+      <div className="pointer-events-none fixed right-4 top-4 rounded-full bg-gray-800/80 px-5 py-2 text-sm font-medium text-gray-200 shadow">
         Tokens aprox: {approximateTokenCount}
       </div>
-      <header className="border-b border-gray-800 bg-gray-950/70 p-4">
+      <header className="border-b border-gray-800 bg-gray-950/70 p-4 lg:px-8">
         <h1 className="text-2xl font-semibold">MapyChat Web</h1>
         <p className="text-sm text-gray-400">Streaming SSE con Grok y guardas de seguridad reforzadas.</p>
       </header>
-      <main ref={chatRef} className="flex-1 space-y-4 overflow-y-auto p-4">
+      <main
+        ref={chatRef}
+        className="flex-1 space-y-5 overflow-y-auto px-4 py-4 md:px-8 lg:px-16"
+      >
         {messages.map((message, index) => (
           <div
             key={`${message.role}-${index}`}
             className={`flex w-full ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
             <div
-              className={`max-w-xl whitespace-pre-wrap rounded-lg px-4 py-2 text-sm shadow-md transition ${
+              className={`w-full max-w-4xl whitespace-pre-wrap rounded-xl px-5 py-3 text-base shadow-md transition ${
                 message.role === 'user' ? 'bg-blue-600/80' : 'bg-gray-800/80'
               }`}
             >
@@ -293,18 +310,63 @@ export default function Home() {
         ))}
         {error && <p className="text-sm text-red-400">{error}</p>}
       </main>
-      <form onSubmit={handleSubmit} className="space-y-3 border-t border-gray-800 bg-gray-950/70 p-4">
-        <div>
-          <label htmlFor="systemPrompt" className="mb-2 block text-sm font-medium text-gray-300">
-            System Prompt
-          </label>
-          <textarea
-            id="systemPrompt"
-            value={systemPrompt}
-            onChange={(event) => handleSystemPromptChange(event.target.value)}
-            className="h-24 w-full rounded-md border border-gray-700 bg-gray-800 p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
-            maxLength={4000}
-          />
+      <form onSubmit={handleSubmit} className="space-y-4 border-t border-gray-800 bg-gray-950/70 p-4 lg:px-8">
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="rounded-md border border-gray-800 bg-gray-900/60">
+            <div className="flex items-center justify-between gap-4 border-b border-gray-800 px-4 py-3">
+              <div>
+                <label htmlFor="systemPrompt" className="text-sm font-medium text-gray-200">
+                  System Prompt
+                </label>
+                <p className="text-xs text-gray-400">Configura el comportamiento base del asistente.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSystemPrompt((prev) => !prev)}
+                className="rounded-md border border-gray-700 px-3 py-1 text-xs font-semibold text-gray-200 transition hover:border-blue-500 hover:text-white"
+                aria-expanded={showSystemPrompt}
+              >
+                Mostrar / Ocultar
+              </button>
+            </div>
+            {showSystemPrompt && (
+              <textarea
+                id="systemPrompt"
+                value={systemPrompt}
+                onChange={(event) => handleSystemPromptChange(event.target.value)}
+                className="h-32 w-full rounded-b-md border-0 bg-transparent p-4 text-sm text-white focus:outline-none"
+                maxLength={4000}
+              />
+            )}
+          </div>
+          <div className="rounded-md border border-gray-800 bg-gray-900/60">
+            <div className="flex items-center justify-between gap-4 border-b border-gray-800 px-4 py-3">
+              <div>
+                <label htmlFor="characterPrompt" className="text-sm font-medium text-gray-200">
+                  Prompt de personaje
+                </label>
+                <p className="text-xs text-gray-400">Define voz y rasgos del personaje.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCharacterPrompt((prev) => !prev)}
+                className="rounded-md border border-gray-700 px-3 py-1 text-xs font-semibold text-gray-200 transition hover:border-blue-500 hover:text-white"
+                aria-expanded={showCharacterPrompt}
+              >
+                Mostrar / Ocultar
+              </button>
+            </div>
+            {showCharacterPrompt && (
+              <textarea
+                id="characterPrompt"
+                value={characterPrompt}
+                onChange={(event) => handleCharacterPromptChange(event.target.value)}
+                className="h-32 w-full rounded-b-md border-0 bg-transparent p-4 text-sm text-white focus:outline-none"
+                maxLength={4000}
+                placeholder="Ejemplo: Responde como un guía turístico amable con humor ligero."
+              />
+            )}
+          </div>
         </div>
         <div className="flex flex-col gap-3 md:flex-row md:items-end">
           <div className="flex-1">
