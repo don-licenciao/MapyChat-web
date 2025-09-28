@@ -6,17 +6,6 @@ type ChatMessage = {
   content: string;
 };
 
-const isChatMessage = (value: unknown): value is ChatMessage => {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const message = value as { role?: unknown; content?: unknown };
-  if (message.role !== 'system' && message.role !== 'user' && message.role !== 'assistant') {
-    return false;
-  }
-  return typeof message.content === 'string';
-};
-
 type RequestBody = {
   model: string;
   temperature?: number;
@@ -159,7 +148,7 @@ export async function POST(req: NextRequest) {
     };
 
     const body = (await req.json()) as Partial<RequestBody>;
-    const { model, temperature, systemPrompt, messages: rawMessages } = body;
+    const { model, temperature, systemPrompt, messages } = body;
 
     if (!model || !ALLOWED_MODELS.has(model)) {
       return jsonError('Modelo no válido', 400, 'bad_request', rateLimitHeaders);
@@ -169,23 +158,33 @@ export async function POST(req: NextRequest) {
       return jsonError('systemPrompt inválido o demasiado largo', 400, 'bad_request', rateLimitHeaders);
     }
 
-    if (!Array.isArray(rawMessages) || rawMessages.length === 0 || rawMessages.length > 50) {
+    const inMsgs = Array.isArray(messages) ? messages : [];
+    if (inMsgs.length === 0 || inMsgs.length > 50) {
       return jsonError('messages inválido o demasiados elementos', 400, 'bad_request', rateLimitHeaders);
     }
 
-    const typedMessages: ChatMessage[] = [];
-    for (const message of rawMessages) {
-      if (!isChatMessage(message)) {
-        return jsonError('Mensaje inválido', 400, 'bad_request', rateLimitHeaders);
-      }
-      const length = message.content.length;
-      if (length === 0 || length > 8000) {
-        return jsonError('Mensaje inválido', 400, 'bad_request', rateLimitHeaders);
-      }
-      typedMessages.push({ role: message.role, content: message.content });
+    let safeMsgs: ChatMessage[];
+    try {
+      safeMsgs = inMsgs.map((message: any) => {
+        const role = message?.role;
+        const content = typeof message?.content === 'string' ? message.content : '';
+
+        if (role !== 'system' && role !== 'user' && role !== 'assistant') {
+          throw new Error('Rol de mensaje inválido.');
+        }
+
+        if (!content || content.length > 8000) {
+          throw new Error('Mensaje inválido');
+        }
+
+        return { role, content } satisfies ChatMessage;
+      });
+    } catch (parseError) {
+      const errorMessage = parseError instanceof Error ? parseError.message : 'Mensaje inválido';
+      return jsonError(errorMessage, 400, 'bad_request', rateLimitHeaders);
     }
 
-    const lastUserMessage = [...typedMessages].reverse().find((msg) => msg.role === 'user');
+    const lastUserMessage = [...safeMsgs].reverse().find((msg) => msg.role === 'user');
     if (!lastUserMessage) {
       return jsonError('No hay mensaje de usuario', 400, 'bad_request', rateLimitHeaders);
     }
@@ -194,13 +193,14 @@ export async function POST(req: NextRequest) {
 
     const clampedTemp = Math.min(Math.max(typeof temperature === 'number' ? temperature : 0.8, 0), 2);
 
-    const systemMessage: ChatMessage = { role: 'system', content: systemPrompt };
+    const systemMsg: ChatMessage = { role: 'system', content: systemPrompt };
+    const finalMsgs: ChatMessage[] = [systemMsg, ...safeMsgs].slice(-51);
 
     const payload = {
       model,
       temperature: clampedTemp,
       stream: true,
-      messages: [systemMessage, ...typedMessages].slice(-51),
+      messages: finalMsgs,
     } satisfies {
       model: string;
       temperature: number;
