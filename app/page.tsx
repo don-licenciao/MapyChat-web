@@ -327,7 +327,7 @@ export default function Home() {
         Tokens aprox: {approximateTokenCount}
       </div>
       <header className="border-b border-gray-800 bg-gray-950/70 p-4 lg:px-8">
-        <h1 className="text-2xl font-semibold">MapyChat Web</h1>
+        <h1 className="text-2xl font-semibold">Quinzy</h1>
         <p className="text-sm text-gray-400">Streaming SSE con Grok y guardas de seguridad reforzadas.</p>
       </header>
       <main

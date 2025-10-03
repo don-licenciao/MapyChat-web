@@ -1,4 +1,4 @@
-# MapyChat Web
+# Quinzy
 
 Una SPA para chatear con Grok de xAI mediante streaming SSE, con guardas estrictas de contenido.
 

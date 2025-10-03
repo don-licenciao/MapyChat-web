@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'MapyChat Web',
-  description: 'Chat seguro con Grok de xAI usando streaming SSE',
+  title: 'Quinzy',
+  description: 'Quinzy: chat seguro con Grok de xAI usando streaming SSE',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
