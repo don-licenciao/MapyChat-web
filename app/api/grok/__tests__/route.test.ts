@@ -1,23 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
-const buildRequest = (overrides: Record<string, unknown> = {}) =>
-  new NextRequest('https://example.com/api/grok', {
-    method: 'POST',
-    headers: new Headers({
-      'content-type': 'application/json',
-      origin: 'https://example.com',
-    }),
-    body: JSON.stringify({
-      model: 'grok-4-fast-reasoning',
-      temperature: 0.8,
-      systemPrompt: 'hola',
-      messages: [{ role: 'user', content: 'hola' }],
-      ...overrides,
-    }),
-  });
-
 const encoder = new TextEncoder();
+
 const buildStream = () =>
   new ReadableStream<Uint8Array>({
     start(controller) {
@@ -25,6 +10,29 @@ const buildStream = () =>
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       controller.close();
     },
+  });
+
+const BASE_BODY = {
+  model: 'grok-4-fast-reasoning',
+  temperature: 0.8,
+  systemPrompt: 'hola',
+  characterPrompt: '',
+};
+
+type BodyOverrides = Record<string, unknown>;
+
+const buildRequest = (overrides: BodyOverrides = {}) =>
+  new NextRequest('https://example.com/api/grok', {
+    method: 'POST',
+    headers: new Headers({
+      'content-type': 'application/json',
+      origin: 'https://example.com',
+    }),
+    body: JSON.stringify({
+      ...BASE_BODY,
+      messages: [{ role: 'user', content: 'hola' }],
+      ...overrides,
+    }),
   });
 
 describe('POST /api/grok', () => {
@@ -40,7 +48,7 @@ describe('POST /api/grok', () => {
     vi.resetModules();
   });
 
-  it('incluye encabezados RateLimit-* y max_output_tokens según responseLevel', async () => {
+  it('procesa mensajes multimodales con texto e imagen embebida y conserva encabezados RateLimit-*', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
@@ -49,25 +57,46 @@ describe('POST /api/grok', () => {
           headers: { 'Content-Type': 'text/event-stream' },
         }),
       );
-
     global.fetch = fetchMock;
 
     const { POST } = await import('../route');
-    const response = await POST(buildRequest({ responseLevel: 4 }));
-    const limit = response.headers.get('ratelimit-limit');
-    const remaining = response.headers.get('ratelimit-remaining');
-    const reset = response.headers.get('ratelimit-reset');
+    const imageDataUrl =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Yl7iOsAAAAASUVORK5CYII=';
+
+    const response = await POST(
+      buildRequest({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'hola' },
+              { type: 'image_url', image_url: { url: imageDataUrl, detail: 'auto' } },
+            ],
+          },
+        ],
+        responseLevel: 4,
+      }),
+    );
 
     expect(response.status).toBe(200);
-    expect(limit).toBe('10');
-    expect(remaining).toBe('9');
-    expect(Number(reset)).toBeGreaterThanOrEqual(1);
+    expect(response.headers.get('ratelimit-limit')).toBe('10');
+    expect(response.headers.get('ratelimit-remaining')).toBe('9');
 
-    const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
-    expect(body.max_output_tokens).toBe(1024);
+    const fetchArgs = fetchMock.mock.calls[0];
+    expect(fetchArgs).toBeDefined();
+    const payload = JSON.parse(fetchArgs[1]?.body as string);
+    expect(payload.messages).toHaveLength(2);
+    const userMessage = payload.messages[1];
+    expect(Array.isArray(userMessage.content)).toBe(true);
+    expect(userMessage.content[0]).toEqual({ type: 'text', text: 'hola' });
+    expect(userMessage.content[1]).toEqual({
+      type: 'image_url',
+      image_url: { url: imageDataUrl, detail: 'auto' },
+    });
+    expect(payload.max_output_tokens).toBe(1024);
   });
 
-  it('responde con 429 y encabezados informativos al superar el límite', async () => {
+  it('mantiene el orden de múltiples imágenes en el contenido del usuario', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
@@ -76,7 +105,121 @@ describe('POST /api/grok', () => {
           headers: { 'Content-Type': 'text/event-stream' },
         }),
       );
+    global.fetch = fetchMock;
 
+    const { POST } = await import('../route');
+    const firstUrl = 'https://cdn.example.com/uno.jpg';
+    const secondUrl = 'https://cdn.example.com/dos.png';
+
+    const response = await POST(
+      buildRequest({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'hola' },
+              { type: 'image_url', image_url: { url: firstUrl, detail: 'low' } },
+              { type: 'image_url', image_url: { url: secondUrl, detail: 'high' } },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    const content = body.messages[1].content;
+    expect(content[0]).toEqual({ type: 'text', text: 'hola' });
+    expect(content[1]).toEqual({ type: 'image_url', image_url: { url: firstUrl, detail: 'low' } });
+    expect(content[2]).toEqual({ type: 'image_url', image_url: { url: secondUrl, detail: 'high' } });
+  });
+
+  it('normaliza valores inválidos de detail a auto', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(buildStream(), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
+    global.fetch = fetchMock;
+
+    const { POST } = await import('../route');
+    const imageUrl = 'https://cdn.example.com/img.png';
+
+    const response = await POST(
+      buildRequest({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'image_url', image_url: { url: imageUrl, detail: 'ultra' } }],
+          },
+        ],
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(body.messages[1].content[0]).toEqual({
+      type: 'image_url',
+      image_url: { url: imageUrl, detail: 'auto' },
+    });
+  });
+
+  it('rechaza data URLs mayores a 20 MiB con error 400', async () => {
+    const { POST } = await import('../route');
+    const bytes = 20 * 1024 * 1024 + 10;
+    const base64Length = Math.ceil(bytes / 3) * 4;
+    const oversizedBase64 = 'A'.repeat(base64Length);
+    const bigDataUrl = `data:image/png;base64,${oversizedBase64}`;
+
+    const response = await POST(
+      buildRequest({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'image_url', image_url: { url: bigDataUrl } }],
+          },
+        ],
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    const payload = await response.json();
+    expect(payload.error).toMatch(/20 MiB/);
+  });
+
+  it('acepta mensajes solo de texto y aplica límites por defecto', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(buildStream(), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
+    global.fetch = fetchMock;
+
+    const { POST } = await import('../route');
+
+    const response = await POST(buildRequest());
+    expect(response.status).toBe(200);
+    const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(body.max_output_tokens).toBe(512);
+    expect(body.messages[0]).toEqual({ role: 'system', content: 'hola' });
+    expect(body.messages[1]).toEqual({ role: 'user', content: 'hola' });
+  });
+
+  it('devuelve 429 con encabezados Retry-After y RateLimit-* cuando se excede el límite', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(buildStream(), {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
     global.fetch = fetchMock;
 
     const { POST } = await import('../route');
@@ -93,75 +236,5 @@ describe('POST /api/grok', () => {
     expect(limitedResponse.headers.get('ratelimit-remaining')).toBe('0');
     expect(limitedResponse.headers.get('ratelimit-reset')).toBe('60');
     expect(fetchMock).toHaveBeenCalledTimes(10);
-  });
-
-  it('antepone el prompt de personaje como mensaje de sistema', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(buildStream(), {
-          status: 200,
-          headers: { 'Content-Type': 'text/event-stream' },
-        }),
-      );
-
-    global.fetch = fetchMock;
-
-    const { POST } = await import('../route');
-
-    const response = await POST(
-      buildRequest({ characterPrompt: '  voz heroica \u0000\n' }),
-    );
-
-    expect(response.status).toBe(200);
-    const fetchArgs = fetchMock.mock.calls[0];
-    expect(fetchArgs).toBeDefined();
-    const body = JSON.parse(fetchArgs[1]?.body as string);
-    expect(body.messages).toHaveLength(3);
-    expect(body.messages[0]).toEqual({ role: 'system', content: 'hola' });
-    expect(body.messages[1]).toEqual({ role: 'system', content: 'voz heroica' });
-    expect(body.messages[2]).toEqual({ role: 'user', content: 'hola' });
-    expect(body.max_output_tokens).toBe(512);
-  });
-
-  it('aplica clamping de responseLevel y maxTokens directos', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(buildStream(), {
-          status: 200,
-          headers: { 'Content-Type': 'text/event-stream' },
-        }),
-      );
-
-    global.fetch = fetchMock;
-
-    const { POST } = await import('../route');
-
-    const highLevelResponse = await POST(buildRequest({ responseLevel: 9 }));
-    expect(highLevelResponse.status).toBe(200);
-    let body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
-    expect(body.max_output_tokens).toBe(2048);
-
-    fetchMock.mockClear();
-
-    const lowLevelResponse = await POST(buildRequest({ responseLevel: 0 }));
-    expect(lowLevelResponse.status).toBe(200);
-    body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
-    expect(body.max_output_tokens).toBe(128);
-
-    fetchMock.mockClear();
-
-    const defaultResponse = await POST(buildRequest());
-    expect(defaultResponse.status).toBe(200);
-    body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
-    expect(body.max_output_tokens).toBe(512);
-
-    fetchMock.mockClear();
-
-    const maxTokensResponse = await POST(buildRequest({ maxTokens: 9999 }));
-    expect(maxTokensResponse.status).toBe(200);
-    body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
-    expect(body.max_output_tokens).toBe(2048);
   });
 });

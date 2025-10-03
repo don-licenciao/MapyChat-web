@@ -69,6 +69,16 @@ El cliente persiste la preferencia en `localStorage` y envía el valor resultant
 
 > Nota: si el proveedor aplica límites distintos por modelo, esos topes prevalecen sobre la configuración local.
 
+### Entrada y salida de imágenes
+
+- **Formatos soportados:** JPG y PNG. Cada archivo se procesa en el cliente y se rechaza si supera ~20&nbsp;MiB tras la compresión opcional.
+- **Formas de adjuntar:** botón "Adjuntar imagen", arrastrar y soltar sobre el compositor o pegar directamente desde el portapapeles.
+- **Detail por mensaje:** selector `auto` (predeterminado), `low` o `high`. El valor predeterminado se puede fijar en el drawer de configuración y se aplica a todas las imágenes del envío actual.
+- **Descarga de imágenes:** cada mensaje que contiene imágenes muestra miniaturas y un botón "Descargar" que genera un archivo (`blob:` para data URLs o el mismo `https://` si es público).
+- **Payload multimodal:** cuando hay imágenes, el contenido del usuario se envía como lista de partes `{ type: 'text' | 'image_url' }`, incluyendo `image_url.detail` para cada adjunto.
+
+> Nota: si xAI impone restricciones adicionales por modelo o formato, esas reglas prevalecerán sobre la configuración local.
+
 ## Avisos importantes
 - Respeta la Acceptable Use Policy de xAI y las leyes aplicables.
 - La aplicación es estrictamente para mayores de 18 años.

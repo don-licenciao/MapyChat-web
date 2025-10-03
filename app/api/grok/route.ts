@@ -1,17 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { guardOrThrow } from '@/lib/nsfwGuard';
 
+type DetailLevel = 'auto' | 'low' | 'high';
+
+type TextPart = { type: 'text'; text: string };
+type ImagePart = { type: 'image_url'; image_url: { url: string; detail: DetailLevel } };
+type MessagePart = TextPart | ImagePart;
+type MessageContent = string | MessagePart[];
+
 type ChatMessage = {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: MessageContent;
 };
 
 type RequestBody = {
-  model: string;
+  model?: string;
   temperature?: number;
-  systemPrompt: string;
+  systemPrompt?: string;
   characterPrompt?: string;
-  messages: ChatMessage[];
+  messages?: unknown;
   responseLevel?: number;
   maxTokens?: number;
 };
@@ -26,17 +33,22 @@ const MIN_OUTPUT_TOKENS = BASE;
 const MAX_OUTPUT_TOKENS = BASE * 2 ** (5 - 1);
 const DEFAULT_OUTPUT_TOKENS = BASE * 2 ** (3 - 1);
 
-function tokensForLevel(level: number): number {
-  const n = Math.max(1, Math.min(5, Math.floor(Number.isFinite(level) ? level : 3)));
-  return BASE * 2 ** (n - 1);
-}
+const TOKEN_FIELD = 'max_output_tokens' as const; // Grok expects max_output_tokens to limit the response length.
+
+const MAX_MESSAGES = 50;
+const MAX_TEXT_CHARS = 8000;
+const MAX_PROMPT_CHARS = 4000;
+const MAX_DATA_URL_BYTES = 20 * 1024 * 1024; // 20 MiB
+
+const DATA_URL_PATTERN = /^data:image\/(png|jpe?g);base64,([a-z0-9+/=\r\n]+)$/i;
+
+const DETAIL_LEVELS: DetailLevel[] = ['auto', 'low', 'high'];
 
 type RateEntry = {
   count: number;
   resetAt: number;
 };
 
-// Edge runtime keeps module scope between invocations on the same isolate.
 const rateState = new Map<string, RateEntry>();
 
 const getClientId = (req: NextRequest) => {
@@ -122,6 +134,132 @@ const jsonError = (
   headers?: Record<string, string>,
 ) => NextResponse.json({ error: message, code }, { status, headers });
 
+const sanitizePrompt = (value: string) => value.replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
+
+const sanitizeTextSegment = (value: string) =>
+  value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+
+const normalizeDetail = (detail?: string): DetailLevel => {
+  if (!detail) return 'auto';
+  const lowered = detail.toLowerCase();
+  return DETAIL_LEVELS.includes(lowered as DetailLevel) ? (lowered as DetailLevel) : 'auto';
+};
+
+const isHttpUrl = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (error) {
+    return false;
+  }
+};
+
+const getDataUrlPayload = (url: string) => {
+  const match = DATA_URL_PATTERN.exec(url);
+  if (!match) {
+    return null;
+  }
+  const [, mime, rawBase64] = match;
+  const base64 = rawBase64.replace(/\s+/g, '');
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  const bytes = Math.floor(base64.length / 4) * 3 - padding;
+  return { mime: mime.toLowerCase(), base64, bytes };
+};
+
+const isValidDataUrl = (url: string) => Boolean(getDataUrlPayload(url));
+
+const coerceMessage = (input: unknown): ChatMessage => {
+  if (!input || typeof input !== 'object') {
+    throw new Error('Mensaje inválido');
+  }
+
+  const role = (input as { role?: unknown }).role;
+  if (role !== 'system' && role !== 'user' && role !== 'assistant') {
+    throw new Error('Rol de mensaje inválido.');
+  }
+
+  const rawContent = (input as { content?: unknown }).content;
+
+  if (typeof rawContent === 'string') {
+    const sanitized = sanitizeTextSegment(rawContent);
+    if (!sanitized || sanitized.length > MAX_TEXT_CHARS) {
+      throw new Error('Mensaje inválido');
+    }
+    return { role, content: sanitized } satisfies ChatMessage;
+  }
+
+  if (!Array.isArray(rawContent)) {
+    throw new Error('Mensaje inválido');
+  }
+
+  const parts: MessagePart[] = [];
+
+  for (const part of rawContent) {
+    if (!part || typeof part !== 'object') {
+      throw new Error('Mensaje inválido');
+    }
+
+    const type = (part as { type?: unknown }).type;
+
+    if (type === 'text') {
+      const textValue = sanitizeTextSegment((part as { text?: unknown }).text as string);
+      if (!textValue || textValue.length > MAX_TEXT_CHARS) {
+        throw new Error('Mensaje inválido');
+      }
+      parts.push({ type: 'text', text: textValue });
+      continue;
+    }
+
+    if (type === 'image_url') {
+      const imagePart = (part as { image_url?: unknown }).image_url;
+      if (!imagePart || typeof imagePart !== 'object') {
+        throw new Error('Mensaje inválido');
+      }
+      const url = ((imagePart as { url?: unknown }).url as string | undefined)?.trim() ?? '';
+      if (!url) {
+        throw new Error('URL de imagen inválida');
+      }
+
+      const detail = normalizeDetail((imagePart as { detail?: unknown }).detail as string | undefined);
+
+      if (url.startsWith('data:')) {
+        const payload = getDataUrlPayload(url);
+        if (!payload) {
+          throw new Error('Data URL de imagen inválida');
+        }
+        if (payload.bytes > MAX_DATA_URL_BYTES) {
+          throw new Error('La imagen adjunta supera el límite de 20 MiB');
+        }
+      } else if (!isHttpUrl(url)) {
+        throw new Error('URL de imagen inválida');
+      }
+
+      parts.push({ type: 'image_url', image_url: { url, detail } });
+      continue;
+    }
+
+    throw new Error('Mensaje inválido');
+  }
+
+  if (parts.length === 0) {
+    throw new Error('Mensaje inválido');
+  }
+
+  return { role, content: parts } satisfies ChatMessage;
+};
+
+const extractTextSegments = (content: MessageContent): string[] => {
+  if (typeof content === 'string') {
+    return [content];
+  }
+  return content.filter((part): part is TextPart => part.type === 'text').map((part) => part.text);
+};
+
+function tokensForLevel(level: number): number {
+  const n = Math.max(1, Math.min(5, Math.floor(Number.isFinite(level) ? level : 3)));
+  return BASE * 2 ** (n - 1);
+}
+
 export async function POST(req: NextRequest) {
   let rateLimitHeaders: Record<string, string> | undefined;
   try {
@@ -160,44 +298,32 @@ export async function POST(req: NextRequest) {
       'RateLimit-Reset': rateLimit.resetSeconds.toString(),
     };
 
-    const body = (await req.json()) as Partial<RequestBody>;
+    const body = (await req.json()) as RequestBody;
     const { model, temperature, systemPrompt, characterPrompt, messages, responseLevel, maxTokens } = body;
 
     if (!model || !ALLOWED_MODELS.has(model)) {
       return jsonError('Modelo no válido', 400, 'bad_request', rateLimitHeaders);
     }
 
-    if (typeof systemPrompt !== 'string' || systemPrompt.length === 0 || systemPrompt.length > 4000) {
+    if (typeof systemPrompt !== 'string' || systemPrompt.length === 0 || systemPrompt.length > MAX_PROMPT_CHARS) {
+      return jsonError('systemPrompt inválido o demasiado largo', 400, 'bad_request', rateLimitHeaders);
+    }
+
+    const systemPromptValue = sanitizePrompt(systemPrompt);
+    if (systemPromptValue.length === 0) {
       return jsonError('systemPrompt inválido o demasiado largo', 400, 'bad_request', rateLimitHeaders);
     }
 
     const characterPromptValue =
-      typeof characterPrompt === 'string' ? characterPrompt.replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim() : '';
-    if (characterPromptValue.length > 4000) {
-      return jsonError('characterPrompt demasiado largo', 400, 'bad_request', rateLimitHeaders);
-    }
+      typeof characterPrompt === 'string' ? sanitizePrompt(characterPrompt).slice(0, MAX_PROMPT_CHARS) : '';
 
-    const inMsgs = Array.isArray(messages) ? messages : [];
-    if (inMsgs.length === 0 || inMsgs.length > 50) {
+    if (!Array.isArray(messages) || messages.length === 0 || messages.length > MAX_MESSAGES) {
       return jsonError('messages inválido o demasiados elementos', 400, 'bad_request', rateLimitHeaders);
     }
 
     let safeMsgs: ChatMessage[];
     try {
-      safeMsgs = inMsgs.map((message: any) => {
-        const role = message?.role;
-        const content = typeof message?.content === 'string' ? message.content : '';
-
-        if (role !== 'system' && role !== 'user' && role !== 'assistant') {
-          throw new Error('Rol de mensaje inválido.');
-        }
-
-        if (!content || content.length > 8000) {
-          throw new Error('Mensaje inválido');
-        }
-
-        return { role, content } satisfies ChatMessage;
-      });
+      safeMsgs = messages.map((message) => coerceMessage(message));
     } catch (parseError) {
       const errorMessage = parseError instanceof Error ? parseError.message : 'Mensaje inválido';
       return jsonError(errorMessage, 400, 'bad_request', rateLimitHeaders);
@@ -212,7 +338,17 @@ export async function POST(req: NextRequest) {
       return jsonError('No hay mensaje de usuario', 400, 'bad_request', rateLimitHeaders);
     }
 
-    guardOrThrow(lastUserMessage.content);
+    const textSegments = extractTextSegments(lastUserMessage.content);
+    for (const segment of textSegments) {
+      try {
+        guardOrThrow(segment);
+      } catch (error) {
+        if (error instanceof Error) {
+          return jsonError(error.message, 400, 'bad_request', rateLimitHeaders);
+        }
+        return jsonError('Contenido no permitido', 400, 'bad_request', rateLimitHeaders);
+      }
+    }
 
     const clampedTemp = Math.min(Math.max(typeof temperature === 'number' ? temperature : 0.8, 0), 2);
 
@@ -226,7 +362,7 @@ export async function POST(req: NextRequest) {
       resolvedMaxTokens = DEFAULT_OUTPUT_TOKENS;
     }
 
-    const systemMsg: ChatMessage = { role: 'system', content: systemPrompt };
+    const systemMsg: ChatMessage = { role: 'system', content: systemPromptValue };
     const finalMsgs: ChatMessage[] = [systemMsg, ...safeMsgs].slice(-51);
 
     const payload = {
@@ -234,14 +370,13 @@ export async function POST(req: NextRequest) {
       temperature: clampedTemp,
       stream: true,
       messages: finalMsgs,
-      // Grok expects max_output_tokens to control the length of the response.
-      max_output_tokens: resolvedMaxTokens,
+      [TOKEN_FIELD]: resolvedMaxTokens,
     } satisfies {
       model: string;
       temperature: number;
       stream: boolean;
       messages: ChatMessage[];
-      max_output_tokens: number;
+      [TOKEN_FIELD]: number;
     };
 
     const apiKey = process.env.XAI_API_KEY;
